@@ -1,9 +1,12 @@
 name: Create drop-in session issue
 
-# Drop-in sessions run every 14 days on a Wednesday. This runs every Wednesday
-# and, on the Wednesdays that are themselves session dates, creates the issue
-# for the session 4 weeks (2 cycles) ahead - so each session's issue is filed
-# about a month before it happens.
+# Sessions run every 14 days on a Wednesday. Every Wednesday morning this looks
+# at the date four weeks out: if a session falls then and has no issue yet, it
+# creates one, so every session gets a tracking issue about a month ahead.
+#
+# There is no catch-up: if a run is missed, that session's issue must be created
+# by hand (Actions > this workflow > Run workflow only helps on a Wednesday when
+# a session is exactly four weeks away).
 
 on:
   schedule:
@@ -19,53 +22,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check whether a session falls 4 weeks from today
-        id: check
-        env:
-          TZ: UTC
-        run: |
-          # 2026-08-26 is a confirmed session date (session 31), used as the
-          # reference point for the every-14-days cadence.
-          anchor="2026-08-26"
-          today=$(date -u +%F)
-          diff_days=$(( ( $(date -u -d "$today" +%s) - $(date -u -d "$anchor" +%s) ) / 86400 ))
-
-          if (( diff_days % 14 != 0 )); then
-            echo "today ($today) is not a session date, nothing to do"
-            echo "create=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          target_date=$(date -u -d "$today + 28 days" +%F)
-          echo "target_date=$target_date" >> "$GITHUB_OUTPUT"
-          echo "create=true" >> "$GITHUB_OUTPUT"
-
-      - name: Create the issue
-        if: steps.check.outputs.create == 'true'
+      - name: Create the issue for the session four weeks out
         env:
           GH_TOKEN: ${{ github.token }}
-          TARGET_DATE: ${{ steps.check.outputs.target_date }}
+          TZ: UTC
+          # 2026-08-26 was session 31; sessions are 14 days apart.
+          ANCHOR_DATE: '2026-08-26'
+          ANCHOR_NUMBER: '31'
           ASSIGNEE: josephwilson8-nhs
         run: |
-          # Skip if an issue for this date already exists.
-          existing=$(gh issue list --label session --state all --limit 200 \
-            --json title --jq "[.[] | select(.title | contains(\"$TARGET_DATE\"))] | length")
-          if (( existing > 0 )); then
-            echo "an issue for $TARGET_DATE already exists, skipping"
+          set -euo pipefail
+
+          target=$(date -u -d "+28 days" +%F)
+          days=$(( ($(date -u -d "$target" +%s) - $(date -u -d "$ANCHOR_DATE" +%s)) / 86400 ))
+
+          if (( days % 14 != 0 )); then
+            echo "no session on $target, nothing to do"
             exit 0
           fi
 
-          last_number=$(gh issue list --label session --state all --limit 200 \
-            --json title --jq '.[].title' | grep -oP 'Drop-in session: \K[0-9]+' | sort -n | tail -1)
-          next_number=$(( ${last_number:-0} + 1 ))
+          number=$(( ANCHOR_NUMBER + days / 14 ))
 
-          body=$(awk '/^---$/{c++; next} c>=2' .github/ISSUE_TEMPLATE/session-checklist.md)
-          body="${body//<SESSION NUMBER>/$next_number}"
-          body="${body//<YYYY-MM-DD>/$TARGET_DATE}"
-          body=$(printf '%s\n' "$body" | sed "/Nominate lead/s|<GITHUB HANDLE (ASSIGN TO THIS ISSUE)>|@$ASSIGNEE|")
+          if gh issue list --label session --state all --limit 300 \
+              --json title --jq '.[].title' | grep -qF "$target"; then
+            echo "session $number ($target) already has an issue"
+            exit 0
+          fi
 
+          # Issue body: the checklist template with its YAML frontmatter removed
+          # (everything up to the second '---') and the lead handle filled in.
+          body=$(awk '/^---$/{c++; next} c>=2' .github/ISSUE_TEMPLATE/session-checklist.md \
+            | sed "/Nominate lead/s|<GITHUB HANDLE (ASSIGN TO THIS ISSUE)>|@$ASSIGNEE|")
+
+          echo "creating issue for session $number ($target)"
           gh issue create \
-            --title "Drop-in session: $next_number ($TARGET_DATE)" \
+            --title "Drop-in session: $number ($target)" \
             --label session \
             --assignee "$ASSIGNEE" \
             --body "$body"
